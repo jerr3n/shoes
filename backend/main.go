@@ -21,6 +21,17 @@ import (
 // entryPayload is the Open Cloud v2 Entry resource. The entry ID lives in the
 // URL path, so the body only carries the value.
 
+const (
+	// How many messages a websocket client can fall behind before its
+	// messages start getting dropped.
+	subscriberBuffer = 32
+	writeTimeout     = 10 * time.Second
+)
+
+// allowedOrigins is matched against the Origin header on /ws. coder/websocket
+// enforces same-origin by default, which would reject the Next.js dev server.
+var allowedOrigins = []string{"localhost:3000", "127.0.0.1:3000"}
+
 func generateKey() (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -51,8 +62,7 @@ func main() {
 
 	// we have no idea what it's sending/receiving
 	// but it's data!
-	tx := make(chan []byte)
-	rx := make(chan []byte)
+	h := newHub()
 
 	r := gin.Default()
 	client := http.Client{Timeout: 10 * time.Second}
@@ -120,17 +130,18 @@ func main() {
 	r.POST("/incoming", func(c *gin.Context) {
 		key := c.Request.Header.Get("X-API-Key")
 
-		var authorized bool
-		if err := db.QueryRow(
-			`SELECT EXISTS(SELECT 1 FROM API_KEYS WHERE API_KEY = ?)`, key,
-		).Scan(&authorized); err != nil {
+		// The key identifies the job, so authenticating and routing are the
+		// same lookup.
+		var jobId string
+		switch err := db.QueryRow(
+			`SELECT JOB_ID FROM API_KEYS WHERE API_KEY = ?`, key,
+		).Scan(&jobId); {
+		case errors.Is(err, sql.ErrNoRows):
+			c.Status(http.StatusUnauthorized)
+			return
+		case err != nil:
 			log.Printf("auth lookup failed: %v", err)
 			c.Status(http.StatusInternalServerError)
-			return
-		}
-
-		if !authorized {
-			c.Status(http.StatusUnauthorized)
 			return
 		}
 
@@ -139,25 +150,55 @@ func main() {
 			c.Status(http.StatusInternalServerError)
 			return
 		}
-		rx <- body
+
+		// Non-blocking: a job with no one watching it still gets a 200 rather
+		// than hanging until a client shows up.
+		if _, dropped := h.publish(jobId, body); dropped > 0 {
+			log.Printf("dropped message for %d slow client(s) on job %q", dropped, jobId)
+		}
 		c.Status(http.StatusOK)
 	})
 
-	r.GET("/ws", func(c *gin.Context) {
-		conn, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{})
+	// TODO: /ws is unauthenticated. Anyone who can reach the port can read a
+	// job's traffic and inject messages into it, given only its job id.
+	r.GET("/ws/:id", func(c *gin.Context) {
+		id := c.Param("id")
+
+		conn, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{
+			OriginPatterns: allowedOrigins,
+		})
 		if err != nil {
 			log.Println("accept:", err)
 			return
 		}
 		defer conn.CloseNow()
+
+		// Tied to the connection, not the gin request: gin cancels the request
+		// context as soon as this handler returns.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Unsubscribing closes sub, which ends the writer goroutine below.
+		sub := h.subscribe(id)
+		defer h.unsubscribe(id, sub)
+
 		go func() {
-			writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			for msg := range rx {
-				_ = conn.Write(writeCtx, websocket.MessageText, msg)
+			for msg := range sub {
+				// Per-write deadline. One shared context would expire ten
+				// seconds into the connection and fail every write after that.
+				writeCtx, cancelWrite := context.WithTimeout(ctx, writeTimeout)
+				err := conn.Write(writeCtx, websocket.MessageText, msg)
+				cancelWrite()
+				if err != nil {
+					log.Printf("write error on job %q: %v", id, err)
+					cancel()
+					return
+				}
 			}
 		}()
+
 		for {
-			_, payload, err := conn.Read(context.Background())
+			_, payload, err := conn.Read(ctx)
 			if err != nil {
 				if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
 					log.Println("Connection closed normally")
@@ -166,7 +207,13 @@ func main() {
 				}
 				break
 			}
-			
+
+			if err := util.SendMessage(util.HTTPConfig{
+				Ctx:    ctx,
+				Client: &client,
+			}, rbx, id, payload); err != nil {
+				log.Printf("failed to publish to job %q: %v", id, err)
+			}
 		}
 
 	})
