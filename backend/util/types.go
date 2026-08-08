@@ -1,13 +1,20 @@
 package util
 
 import (
+	"context"
 	"errors"
+	"net/http"
 	"time"
 )
 
-type InitializationPostRequest struct {
-	UniverseId int `json:"universe_id" binding:"required"`
-	JobId      int `json:"job_id" binding:"required"`
+type HTTPConfig struct {
+	Ctx    context.Context
+	Client *http.Client
+}
+
+type RobloxAPIConfig struct {
+	UniverseID string
+	APIKey     string
 }
 type ResolvedEntry struct {
 	Path               string    `json:"path"`
@@ -22,8 +29,8 @@ type ResolvedEntry struct {
 	} `json:"attributes"`
 }
 
-type UnresolvedKey struct {
-	Code    int    `json:"code"`
+type MessageServiceRequest struct {
+	Topic   string `json:"topic"`
 	Message string `json:"message"`
 }
 

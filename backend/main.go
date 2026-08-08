@@ -4,147 +4,175 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-	"encoding/json"
+	"encoding/hex"
 	"errors"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/jerr3n/shoes/util"
 	"github.com/joho/godotenv"
 	_ "modernc.org/sqlite"
 )
 
-func ProduceKey(ctx context.Context, client *http.Client, jobid string, universeid string, apikey string, producedapikey string) error {
-	url := fmt.Sprintf("https://apis.roblox.com/cloud/v2/universes/%s/data-stores/SecureStore/entries/%s", universeid, jobid)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, strings.NewReader(fmt.Sprintf(`{"%s": "%s"}`, jobid, producedapikey)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("x-api-key", apikey)
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return errors.New("unknown error")
-	}
-	return nil
-}
+// entryPayload is the Open Cloud v2 Entry resource. The entry ID lives in the
+// URL path, so the body only carries the value.
 
-func JobIdValid(ctx context.Context, client *http.Client, jobid string, universeid string, apikey string) (bool, error) {
-	sentAt := time.Now().Unix() // accounting for latency
-	url := fmt.Sprintf("https://apis.roblox.com/cloud/v2/universes/%s/data-stores/SecureStore/entries/%s", universeid, jobid)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return false, err
+func generateKey() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
 	}
-	req.Header.Set("x-api-key", apikey)
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		var body util.ResolvedEntry
-		data, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return false, err
-		}
-		err = json.Unmarshal(data, &body)
-		if err != nil {
-			return false, err
-		}
-		entryTime, err := strconv.ParseInt(body.Value, 10, 64)
-		if err != nil {
-			return false, err
-		}
-		elapsed := sentAt - entryTime
-		if elapsed > 60 || elapsed < 0 {
-			return false, util.ErrorTooMuchTime
-		}
-
-		return true, nil
-	case http.StatusNotFound:
-		print("not found")
-		return false, util.ErrorJobIdNotFound
-	default:
-		return false, util.ErrorMeta
-	}
+	return hex.EncodeToString(raw), nil
 }
 
 func main() {
-	err := godotenv.Load()
-	if err != nil {
+	if err := godotenv.Load(); err != nil {
 		log.Fatal("Error loading .env file")
 	}
-	db, err := sql.Open("sqlite", "file:shoes.db")
+
+	db, err := sql.Open("sqlite", "file:shoes.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
+
+	db.SetMaxOpenConns(1)
+
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS API_KEYS (JOB_ID TEXT PRIMARY KEY, API_KEY TEXT NOT NULL);`); err != nil {
 		log.Fatal(err)
 	}
 
-	var universeId = os.Getenv("UNIVERSE_ID")
-	var robloxApiKey = os.Getenv("ROBLOX_API_KEY")
+	universeId := os.Getenv("UNIVERSE_ID")
+	robloxApiKey := os.Getenv("ROBLOX_API_KEY")
+
+	// we have no idea what it's sending/receiving
+	// but it's data!
+	tx := make(chan []byte)
+	rx := make(chan []byte)
+
 	r := gin.Default()
 	client := http.Client{Timeout: 10 * time.Second}
+	var rbx util.RobloxAPIConfig = util.RobloxAPIConfig{
+		UniverseID: universeId,
+		APIKey:     robloxApiKey,
+	}
 	r.GET("/init/:id", func(c *gin.Context) {
 		id := c.Param("id") // always a string
-		ok, err := JobIdValid(context.Background(), &client, id, universeId, robloxApiKey)
-		fmt.Println(id)
+
+		ok, err := util.ValidateJobId(util.HTTPConfig{
+			Ctx:    c.Request.Context(),
+			Client: &client,
+		}, rbx, id)
 		if !ok {
 			switch {
-			case errors.Is(err, util.ErrorTooMuchTime), errors.Is(err, util.ErrorJobIdNotFound):
+			case errors.Is(err, util.ErrorJobIdNotFound):
+				log.Printf("no entry for job %q", id)
+				c.Status(http.StatusTeapot)
+			case errors.Is(err, util.ErrorTooMuchTime):
+				log.Printf("stale entry for job %q", id)
 				c.Status(http.StatusTeapot)
 			case errors.Is(err, util.ErrorMeta):
 				c.Status(http.StatusInternalServerError)
-			}
-		} else {
-			bytes := make([]byte, 32)
-			_, err := rand.Read(bytes)
-			if err != nil {
+			default:
+				// Network failure, malformed response, unparseable timestamp,
+				// etc. Without this the handler would fall through to 200.
+				log.Printf("job id validation failed for %q: %v", id, err)
 				c.Status(http.StatusInternalServerError)
 			}
-			var apikey = string(bytes)
-			err = ProduceKey(context.Background(), &client, id, universeId, robloxApiKey, apikey)
-			if err != nil {
-				c.Status(http.StatusInternalServerError)
-			}
-			if _, err := db.Exec(`INSERT INTO API_KEYS(JOB_ID, API_KEY) VALUES(?, ?)`, id, apikey); err != nil {
-				c.Status(http.StatusInternalServerError)
-			}
-			c.Status(http.StatusOK)
+			return
 		}
-	})
-	r.GET("/msg", func(c *gin.Context) {
-		key := c.Request.Header.Get("X-API-Key")
-		var authorized bool
-		err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM API_KEYS WHERE API_KEY = ?)`, key).Scan(&authorized)
+
+		apikey, err := generateKey()
 		if err != nil {
+			log.Printf("key generation failed: %v", err)
 			c.Status(http.StatusInternalServerError)
+			return
+		}
+
+		if err := util.ProduceKey(util.HTTPConfig{
+			Ctx:    context.Background(),
+			Client: &client,
+		}, rbx, id, apikey); err != nil {
+			log.Printf("failed to push key for %q: %v", id, err)
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+
+		// Re-initializing an existing job should rotate its key rather than
+		// collide on the primary key.
+		if _, err := db.Exec(
+			`INSERT INTO API_KEYS(JOB_ID, API_KEY) VALUES(?, ?)
+			 ON CONFLICT(JOB_ID) DO UPDATE SET API_KEY = excluded.API_KEY`,
+			id, apikey,
+		); err != nil {
+			log.Printf("failed to store key for %q: %v", id, err)
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+
+		c.Status(http.StatusOK)
+	})
+
+	r.POST("/incoming", func(c *gin.Context) {
+		key := c.Request.Header.Get("X-API-Key")
+
+		var authorized bool
+		if err := db.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM API_KEYS WHERE API_KEY = ?)`, key,
+		).Scan(&authorized); err != nil {
+			log.Printf("auth lookup failed: %v", err)
+			c.Status(http.StatusInternalServerError)
+			return
 		}
 
 		if !authorized {
 			c.Status(http.StatusUnauthorized)
-		} else {
-			body, err := c.GetRawData()
-			if err != nil {
-				c.Status(http.StatusInternalServerError)
-				return
-			}
-			fmt.Print(string(body))
+			return
 		}
+
+		body, err := c.GetRawData()
+		if err != nil {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		rx <- body
+		c.Status(http.StatusOK)
 	})
-	r.Run()
+
+	r.GET("/ws", func(c *gin.Context) {
+		conn, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{})
+		if err != nil {
+			log.Println("accept:", err)
+			return
+		}
+		defer conn.CloseNow()
+		go func() {
+			writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			for msg := range rx {
+				_ = conn.Write(writeCtx, websocket.MessageText, msg)
+			}
+		}()
+		for {
+			_, payload, err := conn.Read(context.Background())
+			if err != nil {
+				if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
+					log.Println("Connection closed normally")
+				} else {
+					log.Printf("Read error: %v", err)
+				}
+				break
+			}
+			
+		}
+
+	})
+
+	if err := r.Run(); err != nil {
+		log.Fatal(err)
+
+	}
 }
