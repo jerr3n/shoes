@@ -1,6 +1,9 @@
 package util
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 type InitializationPostRequest struct {
 	UniverseId int `json:"universe_id" binding:"required"`
@@ -23,3 +26,7 @@ type UnresolvedKey struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
+
+var ErrorTooMuchTime = errors.New("over 60s")
+var ErrorJobIdNotFound = errors.New("jobid not found")
+var ErrorMeta = errors.New("unknown error")
