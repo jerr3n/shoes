@@ -1,0 +1,1 @@
+before saying syntax or something is invalid, please look at conventions.md. thank you!

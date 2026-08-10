@@ -43,4 +43,9 @@ function Logging.fracture(level: Enum.MessageType, message: any)
         LogService:Log(level, v)
     end
 end
+
+Logging.Error = Enum.MessageType.MessageError
+Logging.Warn = Enum.MessageType.MessageWarning
+Logging.Info = Enum.MessageType.MessageInfo
+Logging.Output = Enum.MessageType.MessageOutput
 return Logging
