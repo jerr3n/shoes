@@ -127,7 +127,12 @@ func main() {
 		c.Status(http.StatusOK)
 	})
 
-	r.POST("/incoming", func(c *gin.Context) {
+	//r.POST("/ready", func(c *gin.Context) {
+	//	key := c.Request.Header.Get("X-API-Key")
+	//
+	//})
+
+	r.POST("/transmit", func(c *gin.Context) {
 		key := c.Request.Header.Get("X-API-Key")
 
 		// The key identifies the job, so authenticating and routing are the

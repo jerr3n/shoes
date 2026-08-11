@@ -6,50 +6,51 @@ import (
 	"hash/crc32"
 )
 
-// Wire format:
+// Wire format, mirroring roblox/src/server/chunk.luau:
 //
-//	chunk 0:  II NN CCCCCCCC <payload...>   (12-byte header, <=1012 bytes of payload)
-//	chunk i:  II <payload...>               ( 2-byte header, <=1022 bytes of payload)
+//	every frame: II NN CCCCCCCC <payload...>   (12-byte header, 1012 bytes of payload)
 //
-// II = chunk index, NN = total chunk count, CCCCCCCC = CRC-32/ISO-HDLC of the
-// whole payload. All header fields are lowercase ASCII hex.
+// II = chunk index (zero based), NN = total chunk count, CCCCCCCC = CRC-32/
+// ISO-HDLC of the whole padded payload. All header fields are ASCII hex.
+//
+// The header is repeated on every frame rather than living on frame 0 alone, so
+// the reader can validate any frame it receives in isolation and does not have
+// to have seen frame 0 first. Frames are all exactly frameSize bytes; the last
+// one is zero padded to fill.
+//
+// TODO: the frame carries no payload length, so the reader cannot tell the
+// padding on the final chunk from real trailing NUL bytes -- the checksum below
+// covers the padding, so it agrees with the reader either way and will not
+// catch it. Same TODO as the Luau side: pick padding or a length field before
+// this leaves draft.
 const (
-	limit = 1024
-	first = limit - 2 - 2 - 8 // 1012, chunk 0 pays for count + crc
-	rest  = limit - 2 - 8     // 1022
+	frameSize   = 1024
+	headerSize  = 12
+	payloadSize = frameSize - headerSize // 1012
+	maxChunks   = 255                    // NN is two hex digits
 )
 
 func Chunk(s []byte) ([][]byte, error) {
 	if len(s) == 0 {
 		return nil, errors.New("empty payload")
 	}
-	sum := crc32.ChecksumIEEE(s)
 
-	n := 1
-	if len(s) > first {
-		n += (len(s) - first + rest - 1) / rest // ceil of the remainder
+	n := (len(s) + payloadSize - 1) / payloadSize // ceil
+	if n > maxChunks {
+		return nil, fmt.Errorf("payload needs %d chunks, max is %d", n, maxChunks)
 	}
-	if n > 255 {
-		return nil, fmt.Errorf("payload needs %d chunks, max is 255", n)
-	}
+
+	// pad up front so the checksum covers exactly the bytes the reader
+	// recomposes, padding included
+	padded := make([]byte, n*payloadSize)
+	copy(padded, s)
+	sum := crc32.ChecksumIEEE(padded)
 
 	out := make([][]byte, n)
 	for i := range out {
-		var header string
-		start, capacity := 0, first
-
-		if i == 0 {
-			header = fmt.Sprintf("%02x%02x%08x", i, n, sum)
-		} else {
-			start, capacity = first+(i-1)*rest, rest
-			header = fmt.Sprintf("%02x", i)
-		}
-
-		end := min(start+capacity, len(s))
-
-		c := make([]byte, 0, len(header)+end-start)
-		c = append(c, header...)
-		c = append(c, s[start:end]...)
+		c := make([]byte, 0, frameSize)
+		c = append(c, fmt.Sprintf("%02x%02x%08x", i, n, sum)...)
+		c = append(c, padded[i*payloadSize:(i+1)*payloadSize]...)
 		out[i] = c
 	}
 	return out, nil

@@ -3,9 +3,9 @@ const Signal = require(game.ReplicatedStorage.Shared.Signal)
 const DataStoreService = game:GetService("DataStoreService")
 const Secure = DataStoreService:GetDataStore("SecureStore")
 const HttpService = game:GetService("HttpService")
+const MessagingService = game:GetService("MessagingService")
 const ServerScriptService = game:GetService("ServerScriptService")
-local session = require(script.Parent.session)
-const chunking = require(script.Parent.chunking)
+const chunk = require(script.Parent.chunk)
 
 local Shoes = {}
 Shoes.__index = Shoes
@@ -27,11 +27,12 @@ function Shoes.new(config)
     self.subscription = nil                        -- SubscribeAsync handle
     self.Message = Signal.new()
     self.Closed = Signal.new()
+    self.Thread = nil
     logging.fracture(logging.Output, string.format("created\njobid: %s", self.jobId))
     return self
 end
 
-function Shoes:init()
+function Shoes:init(): number
     logging.log(logging.Output, "starting initalization")
     logging.log(logging.Info, "stage 1 -- datastore")
     local ok, err = pcall(function()
@@ -40,7 +41,7 @@ function Shoes:init()
     if not ok then
         self.state = "fail"
         logging.fracture(logging.Error, err)
-        return
+        return 1
     end
     logging.fracture(logging.Info, "stage 1 complete\nstage 2 -- http")
     local ok, res = pcall(function() 
@@ -51,11 +52,19 @@ function Shoes:init()
     end)
     if not ok then
         self.state = "fail"
-        logging.fracture(logging.Error, res)
+        logging.fracture(logging.Error, tostring(res))
+        return 1
+    end
+    if not res.Success then
+        self.state = "fail"
         if res.StatusCode == 418 then
             logging.fracture(logging.Warn, "418 recv.\nbackend logs will need to be checked")
         end
-        return
+        logging.fracture(logging.Error, string.format(
+            "init failed: %d %s\n%s",
+            res.StatusCode, res.StatusMessage, res.Body
+        ))
+        return 1
     end
     logging.fracture(logging.Info, "stage 2 complete\nstage 3 -- extraction")
     local ok, res = pcall(function()
@@ -64,7 +73,7 @@ function Shoes:init()
     if not ok then
         self.state = "fail"
         logging.fracture(logging.Error, res)
-        return
+        return 1
     end
     self.key = res
     local ok, res = pcall(function()
@@ -77,34 +86,82 @@ function Shoes:init()
     
         self.state = "fail"
         logging.fracture(logging.Error, res)
-        return
+        return 1
     end
     self.key = res
     logging.log(logging.Info, "stage 3 complete")
     self.state = "ready"
     logging.log(logging.Output, "initalization complete.") 
+    return 0
 end
 
---[[
-packet example:
----
-packet 0 
-first two header bytes: 00 (symbolizing its the first packet)
-second two header bytes: xx (variable, how many packets in decimal in hex)
-body (1012 bytes)
-crc32 footer - 8 bytes
-00ff..1012bytes..crc32
----
-packet 1 and so on
-first two header bytes: xx (variable, which packet its in in decimal converted to hex)
-body (1014 bytes)
-crc32 footer - 8 bytes
-xx..1014bytes..crc32
-]]
+function Shoes:open(): number
+    logging.log(logging.Output, "opening socket...")
+    if self.state ~= "ready" then
+        logging.log(logging.Error, "socket is not ready. initialize it first.")
+        self.state = "fail"
+        return 1
+    end
+    self.state = "opening"
+    local ok, res = pcall(function() 
+        return HttpService:RequestAsync({
+	    	Url = string.format("https://%s/api/open", self.baseUrl),
+	    	Method = "GET",
+            Headers = {
+                ["X-API-Key"] = self.key
+            }
+    	})
+    end)
+    if not ok then 
+        logging.fracture(logging.Error, res)
+        self.state = "fail"
+        return 1;
+    end
+    self.Thread = task.spawn(function() 
+        self.state = "open"
+        local ok, err = pcall(function()
+            self.subscription = MessagingService:SubscribeAsync(self.jobId, function(packet)
+                if self.state ~= "open" then return end
+                self:_receive(packet.Data)
+            end)
+        end)
+        if not ok then 
+            logging.fracture(logging.Error, err)
+            self.state = "fail"
+            return 1;
+        end
+    end)
+    logging.log(logging.Output, "socket is now open. enjoy your run!")
+    return 0;
+end
+function Shoes:_receive()
 
---[[
-    Splits a payload into publishable packets. See chunking.luau for the frame.
-]]
-function Shoes:open()
+end
+function Shoes:close(reason: string?): number
+    if self.state ~= "open" and self.state ~= "opening" then
+        logging.log(logging.Warn, "socket is not open; nothing to close")
+        return 1
+    end
 
+    self.state = "closed" 
+
+    if self.subscription then
+        local ok, err = pcall(function()
+            self.subscription:Disconnect()
+        end)
+        if not ok then
+            logging.fracture(logging.Error, tostring(err))
+        end
+        self.subscription = nil
+    end
+
+    if self.Thread and coroutine.status(self.Thread) ~= "dead" then
+        pcall(task.cancel, self.Thread)
+    end
+    self.Thread = nil
+
+    table.clear(self.buffers)
+    self.Closed:Fire(reason or "closed")
+    logging.log(logging.Output, "socket closed.")
+    return 0
 end
