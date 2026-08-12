@@ -1,0 +1,9 @@
+[package]
+name = "jerren/roblox"
+version = "0.1.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+
+[dependencies]
+Konsole = "kyrorblx/konsole@0.1.11"
+Lori = "kyrorblx/lori@0.1.7"

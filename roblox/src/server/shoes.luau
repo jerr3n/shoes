@@ -1,11 +1,12 @@
 const logging = require(script.Parent.logging)
-const Signal = require(game.ReplicatedStorage.Shared.Signal)
+const Signal = require(game.ReplicatedStorage.signal)
 const DataStoreService = game:GetService("DataStoreService")
 const Secure = DataStoreService:GetDataStore("SecureStore")
 const HttpService = game:GetService("HttpService")
 const MessagingService = game:GetService("MessagingService")
-const ServerScriptService = game:GetService("ServerScriptService")
 const chunk = require(script.Parent.chunk)
+
+const BUFFER_TIMEOUT = 30                          -- seconds before a partial message is dropped
 
 local Shoes = {}
 Shoes.__index = Shoes
@@ -68,7 +69,7 @@ function Shoes:init(): number
     end
     logging.fracture(logging.Info, "stage 2 complete\nstage 3 -- extraction")
     local ok, res = pcall(function()
-        Secure:GetAsync(self.jobId)
+        return Secure:GetAsync(self.jobId)
     end)
     if not ok then
         self.state = "fail"
@@ -77,7 +78,7 @@ function Shoes:init(): number
     end
     self.key = res
     local ok, res = pcall(function()
-        Secure:RemoveAsync(self.jobId)
+        return Secure:RemoveAsync(self.jobId)
     end)
     if not ok then
         -- TODO: this is really bad...
@@ -134,8 +135,60 @@ function Shoes:open(): number
     logging.log(logging.Output, "socket is now open. enjoy your run!")
     return 0;
 end
-function Shoes:_receive()
+function Shoes:_sweep()
+    local now = os.clock()
+    for crc, pending in self.buffers do
+        if now - pending.stamp > BUFFER_TIMEOUT then
+            self.buffers[crc] = nil
+            logging.log(logging.Warn, string.format(
+                "dropped incomplete message %08x (%d/%d frames)",
+                crc, pending.count, pending.total
+            ))
+        end
+    end
+end
 
+function Shoes:_receive(frame: string)
+    local index, total, crc = chunk._verifylen(frame)
+    if index < 0 then
+        logging.log(logging.Error, "dropping frame with malformed header")
+        return
+    end
+
+    local pending = self.buffers[crc]
+    if pending == nil or pending.total ~= total then
+        pending = { total = total, count = 0, frames = {}, stamp = os.clock() }
+        self.buffers[crc] = pending
+    end
+
+    if pending.frames[index] ~= nil then
+        logging.log(logging.Warn, string.format("duplicate frame %d on %08x", index, crc))
+        return
+    end
+
+    pending.frames[index] = frame
+    pending.count += 1
+    pending.stamp = os.clock()
+
+    if pending.count < total then
+        self:_sweep()
+        return
+    end
+
+    self.buffers[crc] = nil
+ 
+    local ordered = table.create(total)
+    for i = 0, total - 1 do
+        table.insert(ordered, pending.frames[i])
+    end
+
+    local message = chunk.dechunk(table.concat(ordered))
+    if message == nil then
+        logging.log(logging.Error, string.format("dechunk failed on %08x", crc))
+        return
+    end
+
+    self.Message:Fire(message)
 end
 function Shoes:close(reason: string?): number
     if self.state ~= "open" and self.state ~= "opening" then
@@ -165,3 +218,5 @@ function Shoes:close(reason: string?): number
     logging.log(logging.Output, "socket closed.")
     return 0
 end
+
+return Shoes
