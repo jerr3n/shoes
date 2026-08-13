@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -73,7 +72,7 @@ func ValidateJobId(cfg HTTPConfig, rbx RobloxAPIConfig, jobid string) (bool, err
 		if err := json.Unmarshal(data, &body); err != nil {
 			return false, err
 		}
-		entryTime, err := strconv.ParseInt(body.Value, 10, 64)
+		entryTime, err := body.Timestamp()
 		if err != nil {
 			return false, err
 		}

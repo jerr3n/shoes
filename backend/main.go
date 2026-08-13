@@ -12,9 +12,12 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	ginzap "github.com/gin-contrib/zap"
 	"github.com/gin-gonic/gin"
 	"github.com/jerr3n/shoes/util"
 	"github.com/joho/godotenv"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	_ "modernc.org/sqlite"
 )
 
@@ -44,7 +47,10 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Fatal("Error loading .env file")
 	}
-
+	cfg := zap.NewDevelopmentConfig()
+	cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	logger, _ := cfg.Build()
+	accessLogger := logger.WithOptions(zap.WithCaller(false))
 	db, err := sql.Open("sqlite", "file:shoes.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		log.Fatal(err)
@@ -64,7 +70,10 @@ func main() {
 	// but it's data!
 	h := newHub()
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(ginzap.Ginzap(accessLogger, time.RFC3339, true))
+	r.Use(ginzap.RecoveryWithZap(accessLogger, true))
 	client := http.Client{Timeout: 10 * time.Second}
 	var rbx util.RobloxAPIConfig = util.RobloxAPIConfig{
 		UniverseID: universeId,

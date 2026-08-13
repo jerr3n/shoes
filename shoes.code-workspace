@@ -3,5 +3,8 @@
     { "path": "backend" },
     { "path": "frontend" },
     { "path": "roblox" }
-  ]
+  ],
+  "settings": {
+    "luau-lsp.fflags.enableByDefault": true
+  }
 }

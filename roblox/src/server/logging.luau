@@ -1,63 +1,100 @@
-local LogService = game:GetService("LogService")
+--!strict
+--[[
+	lorilog.luau -- ModuleScript, server-side (next to shoes.luau and etc.luau)
 
---[=[
-	@class Logging
+	Adapts the `etc.Logger` interface onto Lori.
 
-	Thin wrapper around [LogService] for prefixed and multi-line output.
-]=]
-local Logging = {}
+	Lori is a client overlay: it mounts a ScreenGui under PlayerGui, so a server
+	script can never call it directly. This module hands the server something
+	that satisfies `etc.Logger` and ships each line over a RemoteEvent; the
+	companion client script renders it.
 
--- Anchor to server start once, then advance with the monotonic clock.
--- `time()` alone only ticks per frame, so every line in a frame would share a
--- stamp and the microsecond digits would be dead weight.
-local startGameTime = time()
-local startClock = os.clock()
+	Usage:
+		local lorilog = require(script.Parent.lorilog)
+		local socket = Shoes.new(config, lorilog.logger("shoes"))
+]]
 
-local function stamp(): string
-    return string.format("[%12.6f]", startGameTime + (os.clock() - startClock))
-end
---[=[
-	Logs a single message, prefixed with `[shoes]` and a `dmesg`-style timestamp
-	of seconds since the server started.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
-	Non-string values are stringified, so tables, numbers, and instances can be
-	passed directly.
+local etc = require(script.Parent.etc)
 
-```lua
-	Logging.log(Enum.MessageType.MessageWarning, "cache miss")
-	-- [shoes] [    1.238471] cache miss
-```
+-- The client finds the RemoteEvent by this name, so the two files agree on the
+-- string rather than on a shared module.
+local REMOTE_NAME = "LoriLog"
 
-	@param level Enum.MessageType -- Severity the message is logged at
-	@param message any -- Value to log; stringified if not already a string
-]=]
-function Logging.log(level: Enum.MessageType, message: any)
-    local str = string.format("[shoes] %s %*", stamp(), message)
-    LogService:Log(level, str)
-end
---[=[
-	Logs a multi-line message as one entry per line.
+local LoriLog = {}
 
-	A message containing newlines is collapsed into a single entry by the output
-	window, which makes stack traces and serialized tables hard to read. This
-	splits on newlines (normalizing CRLF first) and logs each line separately.
+-- Studio-only by default. FireAllClients would otherwise hand every player in a
+-- live server your job IDs, backend status codes, and error strings. Flip this
+-- deliberately, and only if you have gated it on something (a dev UserId list).
+LoriLog.enabled = RunService:IsStudio()
 
-	Every line carries its own `dmesg`-style timestamp of seconds since the
-	server started. Unlike [Logging.log], the `[shoes]` prefix is not applied.
+local event: RemoteEvent? = nil
 
-	@param level Enum.MessageType -- Severity each line is logged at
-	@param message any -- Value to log; stringified, then split on newlines
-]=]
-function Logging.fracture(level: Enum.MessageType, message: any)
-    local str = tostring(message)
-    local lines = str:gsub("\r\n", "\n"):split("\n")
-    for _, v in ipairs(lines) do
-        LogService:Log(level, string.format("[shoes] %s %*", stamp(), v))
-    end
+local function remote(): RemoteEvent
+	if event then
+		return event
+	end
+
+	local existing = ReplicatedStorage:FindFirstChild(REMOTE_NAME)
+	if existing then
+		event = existing :: RemoteEvent
+		return existing :: RemoteEvent
+	end
+
+	local created = Instance.new("RemoteEvent")
+	created.Name = REMOTE_NAME
+	created.Parent = ReplicatedStorage
+	event = created
+	return created
 end
 
-Logging.Error = Enum.MessageType.MessageError
-Logging.Warn = Enum.MessageType.MessageWarning
-Logging.Info = Enum.MessageType.MessageInfo
-Logging.Output = Enum.MessageType.MessageOutput
-return Logging
+--- Builds a Logger bound to `scope`, which becomes the left-hand label on every
+--- Lori row. One per subsystem reads better than one global: "shoes", "chunk".
+function LoriLog.logger(scope: string): etc.Logger
+	assert(RunService:IsServer(), "lorilog is server-only")
+
+	local target = remote()
+
+	local function log(level: etc.LogLevel, message: string)
+		if not LoriLog.enabled then
+			return
+		end
+		target:FireAllClients(level, scope, message)
+	end
+
+	local function sprint(level: etc.LogLevel, message: string, ...: any)
+		if not LoriLog.enabled then
+			return
+		end
+
+		-- A bad format spec should cost you one ugly log row, not the code path
+		-- that was trying to log.
+		local ok, formatted = pcall(string.format, message, ...)
+		log(level, ok and formatted or `bad format: {message}`)
+	end
+
+	return { log = log, sprint = sprint }
+end
+
+--- Wraps several loggers as one, so output can go to Lori and the Output window
+--- at the same time. Handy while you still trust neither.
+function LoriLog.fanout(...: etc.Logger): etc.Logger
+	local targets = { ... }
+
+	local function log(level: etc.LogLevel, message: string)
+		for _, target in targets do
+			target.log(level, message)
+		end
+	end
+
+	local function sprint(level: etc.LogLevel, message: string, ...: any)
+		local ok, formatted = pcall(string.format, message, ...)
+		log(level, ok and formatted or `bad format: {message}`)
+	end
+
+	return { log = log, sprint = sprint }
+end
+
+return LoriLog
