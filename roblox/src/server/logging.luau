@@ -1,74 +1,82 @@
 --!strict
 --[[
-	lorilog.luau -- ModuleScript, server-side (next to shoes.luau and etc.luau)
+	outputlog.luau -- ModuleScript, server-side (next to shoes.luau and etc.luau)
 
-	Adapts the `etc.Logger` interface onto Lori.
-
-	Lori is a client overlay: it mounts a ScreenGui under PlayerGui, so a server
-	script can never call it directly. This module hands the server something
-	that satisfies `etc.Logger` and ships each line over a RemoteEvent; the
-	companion client script renders it.
+	Adapts the `etc.Logger` interface onto [LogService], i.e. the Output window.
+	This is the old `Logging` module rewritten to the same shape as `lorilog`,
+	so the two are interchangeable and can be combined with `LoriLog.fanout`.
 
 	Usage:
-		local lorilog = require(script.Parent.lorilog)
-		local socket = Shoes.new(config, lorilog.logger("shoes"))
+		local outputlog = require(script.Parent.outputlog)
+		local socket = Shoes.new(config, outputlog.logger("shoes"))
+
+		-- or, both sinks at once:
+		local socket = Shoes.new(config, lorilog.fanout(
+			lorilog.logger("shoes"),
+			outputlog.logger("shoes")
+		))
 ]]
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
+local LogService = game:GetService("LogService")
 
 local etc = require(script.Parent.etc)
 
--- The client finds the RemoteEvent by this name, so the two files agree on the
--- string rather than on a shared module.
-local REMOTE_NAME = "LoriLog"
+local OutputLog = {}
 
-local LoriLog = {}
+-- Unlike lorilog there is nothing to leak here: LogService output is only
+-- visible to whoever is attached to the server. Left as a switch anyway so a
+-- caller can mute a sink without unwiring it.
+OutputLog.enabled = true
 
--- Studio-only by default. FireAllClients would otherwise hand every player in a
--- live server your job IDs, backend status codes, and error strings. Flip this
--- deliberately, and only if you have gated it on something (a dev UserId list).
-LoriLog.enabled = RunService:IsStudio()
+-- `etc.LogLevel` is a string union; the Output window only has four colours.
+-- debug/phase go out as plain output, info is blue, and success has no
+-- distinct rendering so it rides along with info.
+local MESSAGE_TYPE: { [etc.LogLevel]: Enum.MessageType } = {
+	debug = Enum.MessageType.MessageOutput,
+	info = Enum.MessageType.MessageInfo,
+	warn = Enum.MessageType.MessageWarning,
+	error = Enum.MessageType.MessageError,
+	phase = Enum.MessageType.MessageOutput,
+	success = Enum.MessageType.MessageInfo,
+}
 
-local event: RemoteEvent? = nil
+-- Anchor to server start once, then advance with the monotonic clock.
+-- `time()` alone only ticks per frame, so every line in a frame would share a
+-- stamp and the microsecond digits would be dead weight.
+local startGameTime = time()
+local startClock = os.clock()
 
-local function remote(): RemoteEvent
-	if event then
-		return event
-	end
-
-	local existing = ReplicatedStorage:FindFirstChild(REMOTE_NAME)
-	if existing then
-		event = existing :: RemoteEvent
-		return existing :: RemoteEvent
-	end
-
-	local created = Instance.new("RemoteEvent")
-	created.Name = REMOTE_NAME
-	created.Parent = ReplicatedStorage
-	event = created
-	return created
+local function stamp(): string
+	return string.format("[%12.6f]", startGameTime + (os.clock() - startClock))
 end
 
---- Builds a Logger bound to `scope`, which becomes the left-hand label on every
---- Lori row. One per subsystem reads better than one global: "shoes", "chunk".
-function LoriLog.logger(scope: string): etc.Logger
-	assert(RunService:IsServer(), "lorilog is server-only")
-
-	local target = remote()
+--- Builds a Logger bound to `scope`, which replaces the old hardcoded
+--- `[shoes]` prefix on every row. One per subsystem: "shoes", "chunk".
+---
+--- `fracture` is gone as a separate entry point -- every message is split on
+--- newlines and logged a line at a time, since a multi-line message is
+--- collapsed into one unreadable entry by the Output window otherwise. Each
+--- line carries its own `dmesg`-style timestamp and the scope prefix.
+function OutputLog.logger(scope: string): etc.Logger
+	local prefix = `[{scope}]`
 
 	local function log(level: etc.LogLevel, message: string)
-		if not LoriLog.enabled then
+		if not OutputLog.enabled then
 			return
 		end
-		target:FireAllClients(level, scope, message)
+
+		local messageType = MESSAGE_TYPE[level] or Enum.MessageType.MessageOutput
+		local lines = tostring(message):gsub("\r\n", "\n"):split("\n")
+
+		for _, line in lines do
+			LogService:Log(messageType, string.format("%* %s %*", prefix, stamp(), line))
+		end
 	end
 
 	local function sprint(level: etc.LogLevel, message: string, ...: any)
-		if not LoriLog.enabled then
+		if not OutputLog.enabled then
 			return
 		end
-
 		-- A bad format spec should cost you one ugly log row, not the code path
 		-- that was trying to log.
 		local ok, formatted = pcall(string.format, message, ...)
@@ -78,23 +86,4 @@ function LoriLog.logger(scope: string): etc.Logger
 	return { log = log, sprint = sprint }
 end
 
---- Wraps several loggers as one, so output can go to Lori and the Output window
---- at the same time. Handy while you still trust neither.
-function LoriLog.fanout(...: etc.Logger): etc.Logger
-	local targets = { ... }
-
-	local function log(level: etc.LogLevel, message: string)
-		for _, target in targets do
-			target.log(level, message)
-		end
-	end
-
-	local function sprint(level: etc.LogLevel, message: string, ...: any)
-		local ok, formatted = pcall(string.format, message, ...)
-		log(level, ok and formatted or `bad format: {message}`)
-	end
-
-	return { log = log, sprint = sprint }
-end
-
-return LoriLog
+return OutputLog

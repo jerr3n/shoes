@@ -186,13 +186,34 @@ function Shoes:_receive(frame: string)
         table.insert(ordered, pending.frames[i])
     end
 
-    local message = chunk.dechunk(table.concat(ordered))
+    local message = chunk.dechunk(table.concat(ordered), self.logger)
     if message == nil then
         self.logger.sprint(etc.LogLevel.Error, "dechunk failed on %08x", crc)
         return
     end
 
     self.Message:Fire(message)
+end
+-- dont know dont care what that data is
+function Shoes:send(data)
+    local key = self.key
+    local ok, res = pcall(function()
+        return HttpService.RequestAsync({
+        Url = string.format("https://%s/send", key),
+        Method = "POST",
+        Header = {
+            ["API-Key"] = key
+        },
+        Body = tostring(data)
+        })
+    end)
+    if not ok then 
+        return 1
+    end
+    if not res.Success then
+        return 1
+    end
+    return 0
 end
 function Shoes:close(reason: string?): number
     if self.state ~= "open" and self.state ~= "opening" then

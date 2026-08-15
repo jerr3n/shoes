@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -49,8 +50,8 @@ func main() {
 	}
 	cfg := zap.NewDevelopmentConfig()
 	cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
-	logger, _ := cfg.Build()
-	accessLogger := logger.WithOptions(zap.WithCaller(false))
+	loggerPriorToSettingsIWant, _ := cfg.Build()
+	logger := loggerPriorToSettingsIWant.WithOptions(zap.WithCaller(false))
 	db, err := sql.Open("sqlite", "file:shoes.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		log.Fatal(err)
@@ -72,8 +73,8 @@ func main() {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
-	r.Use(ginzap.Ginzap(accessLogger, time.RFC3339, true))
-	r.Use(ginzap.RecoveryWithZap(accessLogger, true))
+	r.Use(ginzap.Ginzap(logger, time.RFC3339, true))
+	r.Use(ginzap.RecoveryWithZap(logger, true))
 	client := http.Client{Timeout: 10 * time.Second}
 	var rbx util.RobloxAPIConfig = util.RobloxAPIConfig{
 		UniverseID: universeId,
@@ -89,17 +90,17 @@ func main() {
 		if !ok {
 			switch {
 			case errors.Is(err, util.ErrorJobIdNotFound):
-				log.Printf("no entry for job %q", id)
+				logger.Warn(fmt.Sprintf("no entry for job %q", id))
 				c.Status(http.StatusTeapot)
 			case errors.Is(err, util.ErrorTooMuchTime):
-				log.Printf("stale entry for job %q", id)
+				logger.Warn(fmt.Sprintf("stale entry for job %q", id))
 				c.Status(http.StatusTeapot)
 			case errors.Is(err, util.ErrorMeta):
 				c.Status(http.StatusInternalServerError)
 			default:
 				// Network failure, malformed response, unparseable timestamp,
 				// etc. Without this the handler would fall through to 200.
-				log.Printf("job id validation failed for %q: %v", id, err)
+				logger.Warn(fmt.Sprintf("job id validation failed for %q: %v", id, err))
 				c.Status(http.StatusInternalServerError)
 			}
 			return
@@ -128,7 +129,7 @@ func main() {
 			 ON CONFLICT(JOB_ID) DO UPDATE SET API_KEY = excluded.API_KEY`,
 			id, apikey,
 		); err != nil {
-			log.Printf("failed to store key for %q: %v", id, err)
+			logger.Error(fmt.Sprintf("failed to store key for %q: %v", id, err))
 			c.Status(http.StatusInternalServerError)
 			return
 		}
@@ -141,8 +142,8 @@ func main() {
 	//
 	//})
 
-	r.POST("/transmit", func(c *gin.Context) {
-		key := c.Request.Header.Get("X-API-Key")
+	r.POST("/send", func(c *gin.Context) {
+		key := c.Request.Header.Get("API-Key")
 
 		// The key identifies the job, so authenticating and routing are the
 		// same lookup.
@@ -154,7 +155,7 @@ func main() {
 			c.Status(http.StatusUnauthorized)
 			return
 		case err != nil:
-			log.Printf("auth lookup failed: %v", err)
+			logger.Error(fmt.Sprintf("auth lookup failed: %v", err))
 			c.Status(http.StatusInternalServerError)
 			return
 		}
@@ -165,10 +166,8 @@ func main() {
 			return
 		}
 
-		// Non-blocking: a job with no one watching it still gets a 200 rather
-		// than hanging until a client shows up.
 		if _, dropped := h.publish(jobId, body); dropped > 0 {
-			log.Printf("dropped message for %d slow client(s) on job %q", dropped, jobId)
+			logger.Error(fmt.Sprintf("dropped message for %d slow client(s) on job %q", dropped, jobId))
 		}
 		c.Status(http.StatusOK)
 	})

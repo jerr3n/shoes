@@ -1,6 +1,10 @@
 --!strict
 
-const logging = require(script.Parent.logging)
+local etc = require(script.Parent.etc)
+local function reject(logger: etc.Logger, message: string, ...: any): nil
+	logger.sprint(etc.LogLevel.error, message, ...)
+	return nil
+end
 --[[
 current packet structure
 II is the current index
@@ -75,65 +79,57 @@ function chunk._extractData(data: string): string
     return string.sub(data, HEADER_SIZE + 1, FRAME_SIZE)
 end
 
-function chunk.dechunk(data: string): string?
-    if #data == 0 or #data % FRAME_SIZE ~= 0 then
-        logging.log(logging.Error, string.format("payload is not a whole number of frames, %* bytes", #data))
-        return nil
-    end
+function chunk.dechunk(data: string, logger: etc.Logger): string?
+	if #data == 0 or #data % FRAME_SIZE ~= 0 then
+		return reject(logger, "payload is not a whole number of frames, %* bytes", #data)
+	end
 
-    const frames = {}
-    for i = 1, #data, FRAME_SIZE do
-        table.insert(frames, string.sub(data, i, i + FRAME_SIZE - 1))
-    end
+	local frames = {}
+	for i = 1, #data, FRAME_SIZE do
+		table.insert(frames, string.sub(data, i, i + FRAME_SIZE - 1))
+	end
 
-    local sourceTotal: number? = nil
-    local sourceCrc: number? = nil
-    const sorted = table.create(#frames)
+	local sourceTotal: number? = nil
+	local sourceCrc: number? = nil
+	local sorted = table.create(#frames)
 
-    for position, frame in frames do
-        const index, total, crc = chunk._verifylen(frame)
-        if index < 0 then
-            logging.log(logging.Error, string.format("malformed header on frame %*", position))
-            return nil
-        end
-        if sourceTotal == nil then
-            sourceTotal = total
-            sourceCrc = crc
-        elseif total ~= sourceTotal then
-            logging.log(logging.Error, string.format("total mismatch, %* != %*", sourceTotal, total))
-            return nil
-        elseif crc ~= sourceCrc then
-            logging.log(logging.Error, string.format("crc mismatch, %* != %*", sourceCrc, crc))
-            return nil
-        end
-        if sorted[index] ~= nil then
-            logging.log(logging.Error, string.format("duplicate frame at index %*", index))
-            return nil
-        end
-        sorted[index] = chunk._extractData(frame)
-    end
+	for position, frame in frames do
+		local index, total, crc = chunk._verifylen(frame)
+		if index < 0 then
+			return reject(logger, "malformed header on frame %*", position)
+		end
+		if sourceTotal == nil then
+			sourceTotal = total
+			sourceCrc = crc
+		elseif total ~= sourceTotal then
+			return reject(logger, "total mismatch, %* != %*", sourceTotal, total)
+		elseif crc ~= sourceCrc then
+			return reject(logger, "crc mismatch, %* != %*", sourceCrc, crc)
+		end
+		if sorted[index] ~= nil then
+			return reject(logger, "duplicate frame at index %*", index)
+		end
+		sorted[index] = chunk._extractData(frame)
+	end
 
-    if #frames ~= sourceTotal then
-        logging.log(logging.Error, string.format("expected %* frames, got %*", sourceTotal, #frames))
-        return nil
-    end
+	if #frames ~= sourceTotal then
+		return reject(logger, "expected %* frames, got %*", sourceTotal, #frames)
+	end
 
-    const ordered = table.create(#frames)
-    for index = 0, (sourceTotal :: number) - 1 do
-        const payload = sorted[index]
-        if payload == nil then
-            logging.log(logging.Error, string.format("missing frame at index %*", index))
-            return nil
-        end
-        table.insert(ordered, payload)
-    end
-    const recomposition = table.concat(ordered)
-    const checksum = chunk._crc32(recomposition)
-    if checksum ~= sourceCrc then
-        logging.log(logging.Error, string.format("checksum mismatch, %* != %*", sourceCrc, checksum))
-        return nil
-    end
-    return recomposition
+	local ordered = table.create(#frames)
+	for index = 0, (sourceTotal :: number) - 1 do
+		local payload = sorted[index]
+		if payload == nil then
+			return reject(logger, "missing frame at index %*", index)
+		end
+		table.insert(ordered, payload)
+	end
+	local recomposition = table.concat(ordered)
+	local checksum = chunk._crc32(recomposition)
+	if checksum ~= sourceCrc then
+		return reject(logger, "checksum mismatch, %* != %*", sourceCrc, checksum)
+	end
+	return recomposition
 end
 
 return chunk

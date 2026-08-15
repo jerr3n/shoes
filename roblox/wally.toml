@@ -5,5 +5,3 @@ registry = "https://github.com/UpliftGames/wally-index"
 realm = "shared"
 
 [dependencies]
-Lori = "kyrorblx/lori@0.1.7"
-Konsole = "kyrorblx/konsole@0.1.11"
