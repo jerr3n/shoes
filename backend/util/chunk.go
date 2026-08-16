@@ -104,6 +104,10 @@ func Chunk(data []byte) ([][]byte, error) {
 		},
 	}
 	header.Flags.ProduceResult()
+	if header.Flags.Result >= flagSlotLimit {
+		// Only reachable if a new flag takes byteArray[0]; see pack in header.go.
+		return nil, errors.New("flags byte is not valid utf-8 on its own")
+	}
 	err = header.ProduceMessageID()
 	if err != nil {
 		return nil, err

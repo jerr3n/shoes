@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -366,6 +367,88 @@ func TestChunkFlags(t *testing.T) {
 			}
 			if got := mustDechunk(t, frames).flags; got != tc.want {
 				t.Errorf("flags = %#02x, want %#02x", got, tc.want)
+			}
+		})
+	}
+}
+
+// The flags byte is written raw, so it has to be valid UTF-8 standing alone.
+// Every combination ProduceResult can currently emit is 0x00..0x03.
+func TestFlagsByteIsValidUtf8(t *testing.T) {
+	for _, compressed := range []bool{false, true} {
+		for _, base128 := range []bool{false, true} {
+			f := Flags{Compressed: compressed, Base128: base128}
+			f.ProduceResult()
+			if !utf8.Valid([]byte{f.Result}) {
+				t.Errorf("compressed=%v base128=%v: flags %#02x is not valid utf-8",
+					compressed, base128, f.Result)
+			}
+			if f.Result >= flagSlotLimit {
+				t.Errorf("compressed=%v base128=%v: flags %#02x is at or past the unusable slot",
+					compressed, base128, f.Result)
+			}
+		}
+	}
+}
+
+// pack maps index i to 1 << (7-i). Indices 1..7 are safe to hand a future flag;
+// index 0 is 0x80, a lone continuation byte that json.Marshal silently rewrites
+// to U+FFFD. Chunk rejects that rather than shipping a corrupt frame.
+func TestFlagSlotZeroIsUnusable(t *testing.T) {
+	for i := range 8 {
+		var bits [8]bool
+		bits[i] = true
+		v := pack(bits)
+
+		if i == 0 {
+			if utf8.Valid([]byte{v}) {
+				t.Errorf("slot 0 packs to %#02x, expected an invalid lone byte", v)
+			}
+			if v < flagSlotLimit {
+				t.Errorf("slot 0 packs to %#02x, below flagSlotLimit %#02x, so Chunk would not catch it",
+					v, flagSlotLimit)
+			}
+			continue
+		}
+		if !utf8.Valid([]byte{v}) {
+			t.Errorf("slot %d packs to %#02x, which is not valid utf-8", i, v)
+		}
+		if v >= flagSlotLimit {
+			t.Errorf("slot %d packs to %#02x, at or past flagSlotLimit %#02x", i, v, flagSlotLimit)
+		}
+	}
+}
+
+// Frames are shipped as string(frame) inside a JSON body by SendMessage, and
+// json.Marshal replaces invalid UTF-8 with U+FFFD instead of erroring. A frame
+// that does not survive this round trip corrupts silently.
+func TestFramesSurviveJSONRoundTrip(t *testing.T) {
+	cases := map[string][]byte{
+		"raw utf-8":  []byte("shoes"),
+		"base128":    randomBytes(t, 40*1024),
+		"compressed": compressible(40 * 1024),
+		"multibyte":  multibyteText(t, 5000),
+	}
+
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			frames, err := Chunk(data)
+			if err != nil {
+				t.Fatalf("Chunk: %v", err)
+			}
+			for i, frame := range frames {
+				body, err := json.Marshal(MessageServiceRequest{Topic: "job", Message: string(frame)})
+				if err != nil {
+					t.Fatalf("frame %d: marshal: %v", i, err)
+				}
+				var back MessageServiceRequest
+				if err := json.Unmarshal(body, &back); err != nil {
+					t.Fatalf("frame %d: unmarshal: %v", i, err)
+				}
+				if !bytes.Equal([]byte(back.Message), frame) {
+					t.Fatalf("frame %d: json round trip changed it, %d bytes in, %d out",
+						i, len(frame), len(back.Message))
+				}
 			}
 		})
 	}

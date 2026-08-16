@@ -20,6 +20,15 @@ func pack(bits [8]bool) byte {
 	return b
 }
 
+// The flags byte goes onto the wire raw, so it has to stand alone as valid
+// UTF-8. bits maps index i to 1 << (7-i), which leaves only seven usable flag
+// slots: indices 1 through 7 give 0x40 down to 0x01, all ASCII. Index 0 gives
+// 0x80, a continuation byte with no lead, which json.Marshal quietly rewrites to
+// U+FFFD on the way out -- the frame would corrupt with no error anywhere until
+// the receiver's crc32 fails. Add new flags from index 6 downward and never take
+// index 0.
+const flagSlotLimit = 0x80
+
 // we have 383,270,912 possible VALID random utf-8 message IDs
 // we have 1920 packets that are able to be sent
 // we have from 0x0080 to 0x07FF
