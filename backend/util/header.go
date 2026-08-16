@@ -3,7 +3,6 @@ package util
 import (
 	"bytes"
 	"crypto/rand"
-	"errors"
 	"unicode/utf8"
 )
 
@@ -39,9 +38,9 @@ func (f *Flags) ProduceResult() {
 }
 
 type Header struct {
-	Crc32     *Quad
+	Crc32     []byte
 	MessageID *Quad
-	Flags     *Flags
+	Flags     Flags
 }
 
 // the go documentation did not consider the complexity this is for.
@@ -63,7 +62,7 @@ func (h *Header) ProduceMessageID() error {
 func (h Header) ProduceFirstHeader(total int) []byte {
 	h.Flags.ProduceResult()
 	var buf bytes.Buffer
-	buf.Grow(3*len(Quad{}) + 1)
+	buf.Grow(initalHeaderSize)
 	buf.Write(h.MessageID[:])
 	buf.Write(h.Crc32[:])
 	buf.WriteRune(rune(0x0080 + total))
@@ -71,18 +70,12 @@ func (h Header) ProduceFirstHeader(total int) []byte {
 	return buf.Bytes()
 }
 
-func (h Header) ProduceHeader(num int) ([]byte, error) {
-	if num <= 1 {
-		return nil, errors.New("new header can not be the first")
-	}
-	if num > 1919 {
-		return nil, errors.New("packet number out of range")
-	}
+func (h Header) ProduceHeader(num int) []byte {
 	h.Flags.ProduceResult()
 
 	var buf bytes.Buffer
-	buf.Grow(len(Quad{}) + 2)
+	buf.Grow(headerSize)
 	buf.Write(h.MessageID[:])
 	buf.WriteRune(rune(0x0080 + num))
-	return buf.Bytes(), nil
+	return buf.Bytes()
 }
