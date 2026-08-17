@@ -140,55 +140,85 @@ function Shoes:open(): number
 end
 function Shoes:_sweep()
     local now = os.clock()
-    for crc, pending in self.buffers do
+    for messageId, pending in self.buffers do
         if now - pending.stamp > BUFFER_TIMEOUT then
-            self.buffers[crc] = nil
+            self.buffers[messageId] = nil
             self.logger.sprint(
                 etc.LogLevel.Warn,
-                "dropped incomplete message %08x (%d/%d frames)",
-                crc, pending.count, pending.total
+                "dropped incomplete message %* (%*/%* frames)",
+                chunk.formatMessageId(messageId), pending.count, pending.total
             )
         end
     end
 end
 
+-- Keyed by message ID, not crc: the crc only rides on the first frame, and that
+-- frame may arrive last. total is unknown until it does.
 function Shoes:_receive(frame: string)
-    local index, total, crc = chunk._verifylen(frame)
-    if index < 0 then
-        self.logger.log(etc.LogLevel.Warn, "dropping frame with malformed header")
+    local parsed = chunk.parseFrame(frame, self.logger)
+    if parsed == nil then
+        return
+    end
+    local id = parsed.messageId
+
+    local pending = self.buffers[id]
+    if pending == nil then
+        pending = { total = nil, crc = nil, flags = nil, count = 0, frames = {}, stamp = os.clock() }
+        self.buffers[id] = pending
+    end
+
+    if parsed.total ~= nil then
+        pending.total = parsed.total
+        pending.crc = parsed.crc
+        pending.flags = parsed.flags
+    end
+
+    -- A position past total would otherwise inflate count and complete the
+    -- message with a real slot still empty.
+    if pending.total ~= nil and parsed.position >= pending.total then
+        self.logger.sprint(
+            etc.LogLevel.Warn,
+            "dropping frame at position %* on %*, total is %*",
+            parsed.position, chunk.formatMessageId(id), pending.total
+        )
         return
     end
 
-    local pending = self.buffers[crc]
-    if pending == nil or pending.total ~= total then
-        pending = { total = total, count = 0, frames = {}, stamp = os.clock() }
-        self.buffers[crc] = pending
-    end
-
-    if pending.frames[index] ~= nil then
-        self.logger.sprint(etc.LogLevel.Debug, "duplicate frame %d on %08x", index, crc)
+    if pending.frames[parsed.position] ~= nil then
+        self.logger.sprint(
+            etc.LogLevel.Debug,
+            "duplicate frame %* on %*", parsed.position, chunk.formatMessageId(id)
+        )
         return
     end
 
-    pending.frames[index] = frame
+    pending.frames[parsed.position] = parsed.payload
     pending.count += 1
     pending.stamp = os.clock()
 
-    if pending.count < total then
+    if pending.total == nil or pending.count < pending.total then
         self:_sweep()
         return
     end
 
-    self.buffers[crc] = nil
- 
-    local ordered = table.create(total)
-    for i = 0, total - 1 do
-        table.insert(ordered, pending.frames[i])
+    self.buffers[id] = nil
+
+    local ordered = table.create(pending.total)
+    for i = 0, pending.total - 1 do
+        local payload = pending.frames[i]
+        if payload == nil then
+            self.logger.sprint(
+                etc.LogLevel.Error,
+                "missing frame at position %* on %*", i, chunk.formatMessageId(id)
+            )
+            return
+        end
+        table.insert(ordered, payload)
     end
 
-    local message = chunk.dechunk(table.concat(ordered), self.logger)
+    local message = chunk.assemble(ordered, pending.crc, pending.flags, self.logger)
     if message == nil then
-        self.logger.sprint(etc.LogLevel.Error, "dechunk failed on %08x", crc)
+        self.logger.sprint(etc.LogLevel.Error, "assemble failed on %*", chunk.formatMessageId(id))
         return
     end
 
