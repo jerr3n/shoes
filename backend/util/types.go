@@ -50,3 +50,15 @@ type MessageServiceRequest struct {
 var ErrorTooMuchTime = errors.New("over 60s")
 var ErrorJobIdNotFound = errors.New("jobid not found")
 var ErrorMeta = errors.New("unknown error")
+
+type APIKey struct {
+	JobID  string `gorm:"primarykey"`
+	APIKey string `gorm:"not null"`
+}
+
+type DataStorage struct {
+	JobID string `gorm:"primarykey"`
+	UUID  string `gorm:"not null"`
+	Data  []byte `gorm:"not null"`
+	Exp   int64  `gorm:"not null"`
+}
