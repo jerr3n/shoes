@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -29,9 +30,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// entryPayload is the Open Cloud v2 Entry resource. The entry ID lives in the
-// URL path, so the body only carries the value.
-
 const (
 	// How many messages a websocket client can fall behind before its
 	// messages start getting dropped.
@@ -40,12 +38,51 @@ const (
 	expiration       = 5
 )
 
-// allowedOrigins is matched against the Origin header on /ws. coder/websocket
-// enforces same-origin by default, which would reject the Next.js dev server.
-var allowedOrigins = []string{"localhost:3000", "127.0.0.1:3000"}
-
 type EntryPayload struct {
 	Value string `json:"value"`
+}
+
+// GameMiddleware middleware to make sure that endpoints that a game would access are secure
+func GameMiddleware(db *gorm.DB, logger *zap.Logger, allowedGameIds []string, strict bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := c.Request.Header.Get("API-Key")
+		jobid := c.Request.Header.Get("Job-ID")
+		if strict {
+			rbxid := c.Request.Header.Get("roblox-id")
+			useragent := c.Request.Header.Get("user-agent")
+			if !(slices.Contains(allowedGameIds, rbxid) && useragent == "Roblox/Linux") {
+				logger.Error("malicious actor caught by middleware",
+					zap.String("req_game_id", rbxid),
+					zap.String("req_useragent", useragent),
+					zap.String("host", c.Request.Host),
+				)
+				c.AbortWithStatus(http.StatusBadRequest)
+				return
+			}
+		}
+
+		var apiKey util.APIKey
+		if err := db.Where("job_id = ?", jobid).First(&apiKey).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+
+				c.AbortWithStatus(http.StatusUnauthorized)
+				return
+			}
+
+			logger.Error(fmt.Sprintf("auth lookup failed: %v", err))
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+		if apiKey.APIKey != key {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+
+		c.Set("jobid", jobid)
+		c.Set("apikey", key)
+		c.Next()
+	}
+
 }
 
 func main() {
@@ -56,17 +93,6 @@ func main() {
 	cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	loggerPriorToSettingsIWant, _ := cfg.Build()
 	logger := loggerPriorToSettingsIWant.WithOptions(zap.WithCaller(false))
-	//db, err := sql.Open("sqlite", "file:shoes.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
-	//defer db.Close()
-	//
-	//db.SetMaxOpenConns(1)
-	//
-	//if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS API_KEYS (JOB_ID TEXT PRIMARY KEY, API_KEY TEXT NOT NULL);`); err != nil {
-	//	log.Fatal(err)
-	//}
 	db, err := gorm.Open(sqlite.Open("shoes.db"), &gorm.Config{})
 	if err != nil {
 		log.Fatal(err)
@@ -89,7 +115,7 @@ func main() {
 		UniverseID: universeId,
 		APIKey:     robloxApiKey,
 	}
-	r.GET("/init/:id", func(c *gin.Context) {
+	r.GET("/init", func(c *gin.Context) {
 		id := c.Param("id") // always a string
 		initLogger := logger.With(
 			zap.String("job_id", id),
@@ -210,18 +236,18 @@ func main() {
 
 		// The key identifies the job, so authenticating and routing are the
 		// same lookup.
-		var jobId string
-		result := db.Where("job_id = ?", jobId).First(&key)
-		if result.Error != nil {
-			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		var apiKey util.APIKey
+		if err := db.Where("api_key = ?", key).First(&apiKey).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
 				c.Status(http.StatusUnauthorized)
 				return
-			} else {
-				logger.Error(fmt.Sprintf("auth lookup failed: %v", result.Error))
-				c.Status(http.StatusInternalServerError)
-				return
 			}
+
+			logger.Error(fmt.Sprintf("auth lookup failed: %v", err))
+			c.Status(http.StatusInternalServerError)
+			return
 		}
+		jobId := apiKey.JobID
 		body, err := c.GetRawData()
 		if err != nil {
 			c.Status(http.StatusInternalServerError)
@@ -235,7 +261,43 @@ func main() {
 	})
 
 	r.GET("/data/:id/:uuidv4", func(c *gin.Context) {
+		id := c.Param("id") // always a string
+		uuidv4 := c.Param("uuidv4")
+		key := c.Request.Header.Get("API-Key")
 
+		var apiKey util.APIKey
+		if err := db.Where("job_id = ?", id).First(&apiKey).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.Status(http.StatusUnauthorized)
+				return
+			}
+
+			logger.Error(fmt.Sprintf("auth lookup failed: %v", err))
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		if apiKey.APIKey != key {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+
+		var entry util.DataStorage
+		if err := db.Where("job_id = ? AND uuid = ?", id, uuidv4).First(&entry).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.Status(http.StatusNotFound)
+				return
+			}
+
+			logger.Error(fmt.Sprintf("data lookup failed: %v", err))
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		// The entry is only good for the window the producer promised.
+		if time.Now().Unix() > entry.Exp {
+			c.Status(http.StatusGone)
+			return
+		}
+		c.Data(http.StatusOK, "application/octet-stream", entry.Data)
 	})
 
 	r.GET("/ws/:id", func(c *gin.Context) {
@@ -289,15 +351,17 @@ func main() {
 			}
 			identifier := uuid.NewString()
 			exp := time.Now().Unix() + expiration
-			db.Create(util.DataStorage{
+			res := db.Create(&util.DataStorage{
 				JobID: id,
 				UUID:  identifier,
 				Data:  payload,
 				Exp:   exp, // timer starts now, server <-> client communication takes place within 5 seconds or it doesnt take place
 			})
-			//if res.Error != nil {
-			//
-			//}
+			if res.Error != nil {
+				// Nothing to hand back on /data, so don't announce it.
+				logger.Error(fmt.Sprintf("failed to store data for job %q: %v", id, res.Error))
+				continue
+			}
 			sum := sha256.Sum256(payload)
 			content := util.MessageServiceRequest{
 				Topic:   id,

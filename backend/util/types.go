@@ -58,7 +58,7 @@ type APIKey struct {
 
 type DataStorage struct {
 	JobID string `gorm:"primarykey"`
-	UUID  string `gorm:"not null"`
+	UUID  string `gorm:"primarykey"`
 	Data  []byte `gorm:"not null"`
 	Exp   int64  `gorm:"not null"`
 }

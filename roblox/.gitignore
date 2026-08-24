@@ -6,6 +6,3 @@
 /*.rbxl.lock
 
 sourcemap.json
-
-# Wally dependencies, restored with `wally install`
-/Packages
