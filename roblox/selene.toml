@@ -2,3 +2,6 @@ std = "roblox"
 
 [lints]
 mixed_table = "allow"
+# `local ok, res = pcall(...)` repeats throughout shoes.luau; the reuse is the
+# idiom, not a mistake.
+shadowing = "allow"

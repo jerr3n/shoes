@@ -1,0 +1,38 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  lint: #not my compute hours!
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up golang tooling
+        uses: actions/setup-go@v5
+        with: 
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Set up rokit
+        uses: CompeyDev/setup-rokit@v0.1.2
+        with:
+          # rokit.toml lives in roblox/, not the repo root; without this the
+          # action finds no manifest and installs none of the tools.
+          path: roblox
+      
+      - name: Set up wally
+        run: wally install
+        working-directory: roblox
+
+      - name: Stylua
+        run: stylua --check src
+        working-directory: roblox
+      
+      - name: Selene
+        run: selene src
+        working-directory: roblox
+
+      - name: Golang linting
+        run: go vet ./...
+        working-directory: backend
