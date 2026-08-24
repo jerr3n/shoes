@@ -16,6 +16,10 @@ jobs:
 
       - name: Set up rokit
         uses: CompeyDev/setup-rokit@v0.1.2
+        with:
+          # rokit.toml lives in roblox/, not the repo root; without this the
+          # action finds no manifest and installs none of the tools.
+          path: roblox
       
       - name: Set up wally
         run: wally install

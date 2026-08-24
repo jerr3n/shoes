@@ -38,6 +38,10 @@ const (
 	expiration       = 5
 )
 
+// allowedOrigins is matched against the Origin header on /ws. coder/websocket
+// enforces same-origin by default, which would reject the Next.js dev server.
+var allowedOrigins = []string{"localhost:3000", "127.0.0.1:3000"}
+
 type EntryPayload struct {
 	Value string `json:"value"`
 }

@@ -13,13 +13,13 @@ local LogLevel = table.freeze({
 	Warn = "warn",
 	Error = "error",
 	Phase = "phase",
-    Success = "success",
-    Debug = "debug",
+	Success = "success",
+	Debug = "debug",
 })
 
 export type LogLevel = "info" | "warn" | "error" | "phase" | "success" | "debug"
 export type Log = (level: LogLevel, message: string) -> ()
 export type Sprint = (level: LogLevel, message: string, ...any) -> ()
-export type Logger = {log: Log, sprint: Sprint}
+export type Logger = { log: Log, sprint: Sprint }
 Etc.LogLevel = LogLevel
 return Etc
