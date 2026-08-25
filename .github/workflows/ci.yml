@@ -36,3 +36,41 @@ jobs:
       - name: Golang linting
         run: go vet ./...
         working-directory: backend
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # `make build-go` stamps the binary with `git describe --tags`; the
+          # default shallow clone has no tags, so the version would be a bare
+          # commit hash.
+          fetch-depth: 0
+
+      - name: Set up golang tooling
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Set up rokit
+        uses: CompeyDev/setup-rokit@v0.1.2
+        with:
+          path: roblox
+
+      - name: Set up wally
+        run: wally install
+        working-directory: roblox
+
+      - name: Build go
+        run: make build-go
+
+      - name: Build rojo
+        run: make build-rojo
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: shoes-${{ github.sha }}
+          path: out/
