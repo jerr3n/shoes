@@ -48,8 +48,9 @@ function Shoes:init(): number
 	self.logger.log(etc.LogLevel.Phase, "phase 2 - http init")
 	local ok, res = pcall(function()
 		return HttpService:RequestAsync({
-			Url = string.format("https://%s/init/%s", self.baseUrl, self.jobId),
+			Url = string.format("https://%s/init", self.baseUrl),
 			Method = "GET",
+			Headers = { ["Job-ID"] = self.jobId },
 		})
 	end)
 	if not ok then

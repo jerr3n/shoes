@@ -129,23 +129,35 @@ func main() {
 		APIKey:     robloxApiKey,
 	}
 	r.GET("/init", func(c *gin.Context) {
-		id := c.Param("id") // always a string
+		id := c.Request.Header.Get("Job-ID")
+
 		initLogger := logger.With(
 			zap.String("job_id", id),
 			zap.String("stage", "init"),
 		)
+		// Without this the empty id sails through and we look up (then write)
+		// the datastore entry named "", keyed to an APIKey row with no job.
+		if id == "" {
+			initLogger.Warn("init with no Job-ID header")
+			c.Status(http.StatusBadRequest)
+			return
+		}
 		sentAt := time.Now().Unix()
 		url := fmt.Sprintf("https://apis.roblox.com/cloud/v2/universes/%s/data-stores/SecureStore/entries/%s", rbx.UniverseID, id)
 		req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, url, nil)
 		if err != nil {
 			initLogger.Error(fmt.Sprintf("failed to init request: %v", err))
+			c.Status(http.StatusInternalServerError)
+			return
 		}
 		req.Header.Set("x-api-key", rbx.APIKey)
+		// On a transport error Do returns a nil response, so there is no status
+		// to log and nothing to close: bail before touching resp.
 		resp, err := client.Do(req)
 		if err != nil {
-			initLogger.Error(fmt.Sprintf("failed to get resp: %v", err),
-				zap.Int("status", resp.StatusCode),
-			)
+			initLogger.Error(fmt.Sprintf("failed to get resp: %v", err))
+			c.Status(http.StatusBadGateway)
+			return
 		}
 		defer resp.Body.Close()
 
@@ -221,16 +233,16 @@ func main() {
 		resp, err = client.Do(req)
 		if err != nil {
 			initLogger.Error(fmt.Sprintf("failed to do req: %v", err))
-			c.Status(http.StatusInternalServerError)
+			c.Status(http.StatusBadGateway)
 			return
 		}
+		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			initLogger.Error(fmt.Sprintf("produce key: roblox returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body))))
 			c.Status(http.StatusInternalServerError)
 			return
 		}
-		resp.Body.Close()
 		entry := util.APIKey{
 			JobID:  id,
 			APIKey: apikey,
