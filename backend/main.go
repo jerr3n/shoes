@@ -27,7 +27,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
-	_ "modernc.org/sqlite"
+	"moul.io/zapgorm2"
 )
 
 const (
@@ -41,6 +41,7 @@ const (
 // allowedOrigins is matched against the Origin header on /ws. coder/websocket
 // enforces same-origin by default, which would reject the Next.js dev server.
 var allowedOrigins = []string{"localhost:3000", "127.0.0.1:3000"}
+var version = "unknown" // this reminds me of the 6 bangs in systemd if you know what i mean
 
 type EntryPayload struct {
 	Value string `json:"value"`
@@ -55,12 +56,12 @@ func GameMiddleware(db *gorm.DB, logger *zap.Logger, allowedGameIds []string, st
 			rbxid := c.Request.Header.Get("roblox-id")
 			useragent := c.Request.Header.Get("user-agent")
 			if !(slices.Contains(allowedGameIds, rbxid) && useragent == "Roblox/Linux") {
-				logger.Error("malicious actor caught by middleware",
+				logger.Warn("malicious actor caught by middleware",
 					zap.String("req_game_id", rbxid),
 					zap.String("req_useragent", useragent),
 					zap.String("host", c.Request.Host),
 				)
-				c.AbortWithStatus(http.StatusBadRequest)
+				c.AbortWithStatus(http.StatusForbidden)
 				return
 			}
 		}
@@ -90,14 +91,20 @@ func GameMiddleware(db *gorm.DB, logger *zap.Logger, allowedGameIds []string, st
 }
 
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("Error loading .env file")
-	}
+
+	// logger stuff
 	cfg := zap.NewDevelopmentConfig()
 	cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	loggerPriorToSettingsIWant, _ := cfg.Build()
 	logger := loggerPriorToSettingsIWant.WithOptions(zap.WithCaller(false))
-	db, err := gorm.Open(sqlite.Open("shoes.db"), &gorm.Config{})
+	logger.Info("shoes - a protected socket between roblox and a backend")
+	logger.Info(fmt.Sprintf("you are on version %s", version))
+	if err := godotenv.Load(); err != nil {
+		logger.Fatal("Error loading .env file")
+	}
+	gormLog := zapgorm2.New(logger)
+	// db stuff
+	db, err := gorm.Open(sqlite.Open("shoes.db"), &gorm.Config{Logger: gormLog})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -105,11 +112,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// env vars
 	universeId := os.Getenv("UNIVERSE_ID")
 	robloxApiKey := os.Getenv("ROBLOX_API_KEY")
 
 	h := newHub()
 
+	// it begins here
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(ginzap.Ginzap(logger, time.RFC3339, true))
@@ -234,87 +243,59 @@ func main() {
 		}
 		c.Status(http.StatusOK)
 	})
-
-	r.POST("/send", func(c *gin.Context) {
-		key := c.Request.Header.Get("API-Key")
-
-		// The key identifies the job, so authenticating and routing are the
-		// same lookup.
-		var apiKey util.APIKey
-		if err := db.Where("api_key = ?", key).First(&apiKey).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.Status(http.StatusUnauthorized)
+	authGroup := r.Group("/")
+	authGroup.Use(GameMiddleware(db, logger, []string{universeId}, false))
+	{
+		authGroup.POST("/send", func(c *gin.Context) {
+			id := fmt.Sprint(c.MustGet("jobid"))
+			// The key identifies the job, so authenticating and routing are the
+			// same lookup.
+			body, err := c.GetRawData()
+			if err != nil {
+				c.Status(http.StatusInternalServerError)
 				return
 			}
 
-			logger.Error(fmt.Sprintf("auth lookup failed: %v", err))
-			c.Status(http.StatusInternalServerError)
-			return
-		}
-		jobId := apiKey.JobID
-		body, err := c.GetRawData()
-		if err != nil {
-			c.Status(http.StatusInternalServerError)
-			return
-		}
+			if _, dropped := h.publish(id, body); dropped > 0 {
+				logger.Error(fmt.Sprintf("dropped message for %d slow client(s) on job %q", dropped, id))
+			}
+			c.Status(http.StatusOK)
+		})
+		authGroup.GET("/data/:uuidv4", func(c *gin.Context) {
+			id := fmt.Sprint(c.MustGet("jobid"))
+			uuidv4 := c.Param("uuidv4")
 
-		if _, dropped := h.publish(jobId, body); dropped > 0 {
-			logger.Error(fmt.Sprintf("dropped message for %d slow client(s) on job %q", dropped, jobId))
-		}
-		c.Status(http.StatusOK)
-	})
+			var entry util.DataStorage
+			if err := db.Where("job_id = ? AND uuid = ?", id, uuidv4).First(&entry).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					c.Status(http.StatusNotFound)
+					return
+				}
 
-	r.GET("/data/:id/:uuidv4", func(c *gin.Context) {
-		id := c.Param("id") // always a string
-		uuidv4 := c.Param("uuidv4")
-		key := c.Request.Header.Get("API-Key")
-
-		var apiKey util.APIKey
-		if err := db.Where("job_id = ?", id).First(&apiKey).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.Status(http.StatusUnauthorized)
+				logger.Error(fmt.Sprintf("data lookup failed: %v", err))
+				c.Status(http.StatusInternalServerError)
 				return
 			}
-
-			logger.Error(fmt.Sprintf("auth lookup failed: %v", err))
-			c.Status(http.StatusInternalServerError)
-			return
-		}
-		if apiKey.APIKey != key {
-			c.Status(http.StatusUnauthorized)
-			return
-		}
-
-		var entry util.DataStorage
-		if err := db.Where("job_id = ? AND uuid = ?", id, uuidv4).First(&entry).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.Status(http.StatusNotFound)
+			// The entry is only good for the window the producer promised.
+			if time.Now().Unix() > entry.Exp {
+				c.Status(http.StatusGone)
 				return
 			}
-
-			logger.Error(fmt.Sprintf("data lookup failed: %v", err))
-			c.Status(http.StatusInternalServerError)
-			return
-		}
-		// The entry is only good for the window the producer promised.
-		if time.Now().Unix() > entry.Exp {
-			c.Status(http.StatusGone)
-			return
-		}
-		c.Data(http.StatusOK, "application/octet-stream", entry.Data)
-	})
+			c.Data(http.StatusOK, "application/octet-stream", entry.Data)
+		})
+	}
 
 	r.GET("/ws/:id", func(c *gin.Context) {
 		id := c.Param("id")
-		//wsLogger := logger.With(
-		//	zap.String("job_id", id),
-		//	zap.
-		//)
+		wsLogger := logger.With(
+			zap.String("job_id", id),
+			zap.String("meth", "tx"),
+		)
 		conn, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{
-			OriginPatterns: allowedOrigins,
+			//OriginPatterns: allowedOrigins,
 		})
 		if err != nil {
-			log.Println("accept:", err)
+			wsLogger.Error(fmt.Sprintf("accept: %v", err))
 			return
 		}
 		defer conn.CloseNow()
@@ -324,11 +305,23 @@ func main() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		// Unsubscribing closes sub, which ends the writer goroutine below.
 		sub := h.subscribe(id)
-		defer h.unsubscribe(id, sub)
+
+		// writerDone is closed when the writer goroutine has stopped touching
+		// conn. Unsubscribing closes sub, which is what ends that goroutine, so
+		// the two have to happen in order and before the deferred CloseNow.
+		writerDone := make(chan struct{})
+		defer func() {
+			h.unsubscribe(id, sub)
+			<-writerDone
+		}()
 
 		go func() {
+			defer close(writerDone)
+			// A dead write means a dead connection: cancelling unblocks the
+			// read loop below so the handler runs its teardown.
+			defer cancel()
+
 			for msg := range sub {
 				// Per-write deadline. One shared context would expire ten
 				// seconds into the connection and fail every write after that.
@@ -336,8 +329,7 @@ func main() {
 				err := conn.Write(writeCtx, websocket.MessageText, msg)
 				cancelWrite()
 				if err != nil {
-					log.Printf("write error on job %q: %v", id, err)
-					cancel()
+					wsLogger.Error(fmt.Sprintf("write failed: %v", err))
 					return
 				}
 			}
@@ -347,9 +339,9 @@ func main() {
 			_, payload, err := conn.Read(ctx)
 			if err != nil {
 				if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
-					log.Println("Connection closed normally")
+					wsLogger.Info("connection closed normally")
 				} else {
-					log.Printf("Read error: %v", err)
+					wsLogger.Error(fmt.Sprintf("read failed: %v", err))
 				}
 				break
 			}
@@ -362,21 +354,21 @@ func main() {
 				Exp:   exp, // timer starts now, server <-> client communication takes place within 5 seconds or it doesnt take place
 			})
 			if res.Error != nil {
-				// Nothing to hand back on /data, so don't announce it.
 				logger.Error(fmt.Sprintf("failed to store data for job %q: %v", id, res.Error))
 				continue
 			}
 			sum := sha256.Sum256(payload)
 			content := util.MessageServiceRequest{
 				Topic:   id,
-				Message: fmt.Sprintf("%s\x1f%s\x1f%d\x04", identifier, hex.EncodeToString(sum[:]), exp),
+				Message: fmt.Sprintf("\x02%s\x1f%s\x1f%d\x03", identifier, hex.EncodeToString(sum[:]), exp),
 			}
 			message, _ := json.Marshal(content)
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("https://apis.roblox.com/cloud/v2/universes/%s:publishMessage", rbx.UniverseID), bytes.NewBuffer(message))
 			if err != nil {
-
+				wsLogger.Error(fmt.Sprintf("failed to build publish request: %v", err))
+				continue
 			}
-			req.Header.Set("Context-Type", "application/json")
+			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("X-API-Key", rbx.APIKey)
 			_, _ = client.Do(req) // see no evil, hear no evil, speak no evil
 		}

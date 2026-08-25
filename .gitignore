@@ -3,3 +3,5 @@ node_modules
 backend/shoes
 shoes.db*
 rbxold
+bin/
+out/

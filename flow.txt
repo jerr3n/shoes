@@ -1,0 +1,15 @@
+initialization
+game->ds
+game->backend/init
+backend<-ds
+backend->ds
+backend/init->game
+game<-ds
+game->ds (clear row)
+--
+message (outbound)
+message->backend
+backened->msgsvc->game (uuidv4sha256sumexpiration)
+game->backend/data/uuidv4
+--
+message (inbound)
