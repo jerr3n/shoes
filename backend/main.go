@@ -258,10 +258,8 @@ func main() {
 	authGroup := r.Group("/")
 	authGroup.Use(GameMiddleware(db, logger, []string{universeId}, false))
 	{
-		authGroup.POST("/send", func(c *gin.Context) {
+		authGroup.POST("/tx", func(c *gin.Context) {
 			id := fmt.Sprint(c.MustGet("jobid"))
-			// The key identifies the job, so authenticating and routing are the
-			// same lookup.
 			body, err := c.GetRawData()
 			if err != nil {
 				c.Status(http.StatusInternalServerError)
@@ -273,7 +271,7 @@ func main() {
 			}
 			c.Status(http.StatusOK)
 		})
-		authGroup.GET("/data/:uuidv4", func(c *gin.Context) {
+		authGroup.GET("/rx/:uuidv4", func(c *gin.Context) {
 			id := fmt.Sprint(c.MustGet("jobid"))
 			uuidv4 := c.Param("uuidv4")
 
@@ -311,17 +309,11 @@ func main() {
 			return
 		}
 		defer conn.CloseNow()
-
-		// Tied to the connection, not the gin request: gin cancels the request
-		// context as soon as this handler returns.
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		sub := h.subscribe(id)
 
-		// writerDone is closed when the writer goroutine has stopped touching
-		// conn. Unsubscribing closes sub, which is what ends that goroutine, so
-		// the two have to happen in order and before the deferred CloseNow.
 		writerDone := make(chan struct{})
 		defer func() {
 			h.unsubscribe(id, sub)
