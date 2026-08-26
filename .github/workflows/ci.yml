@@ -43,9 +43,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # `make build-go` stamps the binary with `git describe --tags`; the
-          # default shallow clone has no tags, so the version would be a bare
-          # commit hash.
           fetch-depth: 0
 
       - name: Set up golang tooling
@@ -63,14 +60,73 @@ jobs:
         run: wally install
         working-directory: roblox
 
-      - name: Build go
-        run: make build-go
+      - name: Build linux-amd64
+        run: make build-plat-linux-amd64
+      - name: Build linux-arm64
+        run: make build-plat-linux-arm64
+      - name: Build darwin-amd64
+        run: make build-plat-darwin-amd64
+      - name: Build darwin-arm64
+        run: make build-plat-darwin-arm64
+      - name: Build windows-amd64
+        run: make build-plat-windows-amd64
+      - name: Build windows-arm64
+        run: make build-plat-windows-arm64
 
       - name: Build rojo
         run: make build-rojo
-
-      - name: Upload build output
+      - name: Upload linux-amd64
         uses: actions/upload-artifact@v4
         with:
-          name: shoes-${{ github.sha }}
-          path: out/
+          name: shoes-linux-amd64
+          path: out/linux-amd64
+
+      - name: Upload linux-arm64
+        uses: actions/upload-artifact@v4
+        with:
+          name: shoes-linux-arm64
+          path: out/linux-arm64
+
+      - name: Upload darwin-amd64
+        uses: actions/upload-artifact@v4
+        with:
+          name: shoes-darwin-amd64
+          path: out/darwin-amd64
+
+      - name: Upload darwin-arm64
+        uses: actions/upload-artifact@v4
+        with:
+          name: shoes-darwin-arm64
+          path: out/darwin-arm64
+
+      - name: Upload windows-amd64
+        uses: actions/upload-artifact@v4
+        with:
+          name: shoes-windows-amd64
+          path: out/windows-amd64.exe
+
+      - name: Upload windows-arm64
+        uses: actions/upload-artifact@v4
+        with:
+          name: shoes-windows-arm64
+          path: out/windows-arm64.exe
+      - name: Upload model file
+        uses: actions/upload-artifact@v4
+        with:
+          name: model.rbxmx
+          path: out/shoes.rbxmx
+          
+  crossplatform:
+    steps:
+      - name: Build linux-amd64
+        run: make build-plat-linux-amd64
+      - name: Build linux-arm64
+        run: make build-plat-linux-arm64
+      - name: Build darwin-amd64
+        run: make build-plat-darwin-amd64
+      - name: Build darwin-arm64
+        run: make build-plat-darwin-arm64
+      - name: Build windows-amd64
+        run: make build-plat-windows-amd64
+      - name: Build windows-arm64
+        run: make build-plat-windows-arm64
