@@ -115,18 +115,3 @@ jobs:
         with:
           name: model.rbxmx
           path: out/shoes.rbxmx
-          
-  crossplatform:
-    steps:
-      - name: Build linux-amd64
-        run: make build-plat-linux-amd64
-      - name: Build linux-arm64
-        run: make build-plat-linux-arm64
-      - name: Build darwin-amd64
-        run: make build-plat-darwin-amd64
-      - name: Build darwin-arm64
-        run: make build-plat-darwin-arm64
-      - name: Build windows-amd64
-        run: make build-plat-windows-amd64
-      - name: Build windows-arm64
-        run: make build-plat-windows-arm64
